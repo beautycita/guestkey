@@ -1,0 +1,6 @@
+.env
+node_modules/
+logs/*.json
+.wwebjs_auth/
+.wwebjs_cache/
+guestkey.db
