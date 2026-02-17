@@ -7,6 +7,28 @@ const LOCK_SCRIPT = process.env.LOCK_SCRIPT_PATH || '~/guestkey/air_lock.py';
 const LOCK_VENV = process.env.LOCK_VENV_PATH ?? '~/beautycita-scraper/venv/bin/activate';
 const BEAUTYPI_HOST = process.env.BEAUTYPI_HOST || 'dmyl@100.93.1.103';
 
+const SSH_OPTIONS = '-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10';
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runWithRetry(fn, maxRetries = 2, delayMs = 5000) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt <= maxRetries) {
+        console.log(`  Retry ${attempt}/${maxRetries} after error: ${err.message}`);
+        await sleep(delayMs);
+      }
+    }
+  }
+  throw lastErr;
+}
+
 function generateCode() {
   const activeCodes = db.getActiveCodes();
   let code;
@@ -54,10 +76,14 @@ function runLockScript(args) {
       resolve({ success: true, raw: stdout.trim() });
     };
 
+    // Log command (sanitize sensitive args)
+    const sanitized = args.replace(/--code\s+'[^']*'/g, "--code '***'");
+    console.log(`  Lock script [${LOCK_MODE}]: air_lock.py ${sanitized}`);
+
     if (LOCK_MODE === 'local') {
       exec(cmd, { timeout: 180000, shell: '/bin/bash' }, callback);
     } else {
-      const sshCmd = `ssh -o ConnectTimeout=10 ${BEAUTYPI_HOST} "${cmd.replace(/"/g, '\\"')}"`;
+      const sshCmd = `ssh ${SSH_OPTIONS} ${BEAUTYPI_HOST} "${cmd.replace(/"/g, '\\"')}"`;
       exec(sshCmd, { timeout: 180000, shell: '/bin/bash' }, callback);
     }
   });
@@ -68,25 +94,29 @@ function shellEscape(str) {
 }
 
 async function addTempUser({ name, password, checkIn, checkOut }) {
-  const args = `add --name ${shellEscape(name)} --code ${shellEscape(String(password))} --checkin ${shellEscape(checkIn)} --checkout ${shellEscape(checkOut)}`;
-  const result = await runLockScript(args);
+  return runWithRetry(async () => {
+    const args = `add --name ${shellEscape(name)} --code ${shellEscape(String(password))} --checkin ${shellEscape(checkIn)} --checkout ${shellEscape(checkOut)}`;
+    const result = await runLockScript(args);
 
-  if (!result.success) {
-    throw new Error(result.error || `Failed to add user on lock (step: ${result.step || 'unknown'})`);
-  }
+    if (!result.success) {
+      throw new Error(result.error || `Failed to add user on lock (step: ${result.step || 'unknown'})`);
+    }
 
-  return result;
+    return result;
+  }, 2, 5000);
 }
 
 async function deleteUser(userName) {
-  const args = `delete --name ${shellEscape(userName)}`;
-  const result = await runLockScript(args);
+  return runWithRetry(async () => {
+    const args = `delete --name ${shellEscape(userName)}`;
+    const result = await runLockScript(args);
 
-  if (!result.success) {
-    throw new Error(result.error || 'Failed to delete user from lock');
-  }
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to delete user from lock');
+    }
 
-  return result;
+    return result;
+  }, 2, 5000);
 }
 
 async function listUsers() {
@@ -94,6 +124,14 @@ async function listUsers() {
   return result;
 }
 
+async function checkLockStatus() {
+  const result = await runLockScript('list');
+  return {
+    count: result.count || 0,
+    battery: result.battery || null
+  };
+}
+
 module.exports = {
-  generateCode, addTempUser, deleteUser, listUsers, runLockScript
+  generateCode, addTempUser, deleteUser, listUsers, checkLockStatus, runLockScript
 };

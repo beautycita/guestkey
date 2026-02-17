@@ -122,7 +122,60 @@ function getActionLog(reservationId) {
   ).all(reservationId);
 }
 
+// --- Error counting + cooldown ---
+
+function getErrorCount(reservationId) {
+  const row = getDb().prepare(
+    "SELECT COUNT(*) as cnt FROM action_log WHERE reservation_id = ? AND action = 'error'"
+  ).get(reservationId);
+  return row ? row.cnt : 0;
+}
+
+function getLastErrorTime(reservationId) {
+  const row = getDb().prepare(
+    "SELECT timestamp FROM action_log WHERE reservation_id = ? AND action = 'error' ORDER BY timestamp DESC LIMIT 1"
+  ).get(reservationId);
+  return row ? row.timestamp : null;
+}
+
+function getLastErrorNotifyTime(errorKey) {
+  const row = getDb().prepare(
+    "SELECT timestamp FROM action_log WHERE action = 'error_notified' AND detail = ? ORDER BY timestamp DESC LIMIT 1"
+  ).get(errorKey);
+  return row ? row.timestamp : null;
+}
+
+function logErrorNotify(errorKey) {
+  getDb().prepare(
+    "INSERT INTO action_log (action, detail) VALUES ('error_notified', ?)"
+  ).run(errorKey);
+}
+
+function markReservationFailed(id) {
+  getDb().prepare("UPDATE reservations SET status = 'failed' WHERE id = ?").run(id);
+}
+
+function getLastBatteryAlert() {
+  const row = getDb().prepare(
+    "SELECT timestamp FROM action_log WHERE action = 'battery_alert' ORDER BY timestamp DESC LIMIT 1"
+  ).get();
+  return row ? row.timestamp : null;
+}
+
+function logBatteryCheck(level) {
+  getDb().prepare(
+    "INSERT INTO action_log (action, detail) VALUES ('battery_check', ?)"
+  ).run(level);
+}
+
+function logBatteryAlert(level) {
+  getDb().prepare(
+    "INSERT INTO action_log (action, detail) VALUES ('battery_alert', ?)"
+  ).run(level);
+}
+
 // Active reservations that never got a lock_user_created action (interrupted or failed)
+// Excludes status='failed' (gave up after max retries)
 function getReservationsNeedingLockUser() {
   return getDb().prepare(`
     SELECT r.* FROM reservations r
@@ -136,6 +189,7 @@ function getReservationsNeedingLockUser() {
 }
 
 // Active reservations within hours of check-in that haven't been successfully notified yet
+// Excludes status='failed'
 function getReservationsNeedingNotification(hoursBeforeCheckin) {
   const hours = parseInt(hoursBeforeCheckin, 10);
   if (isNaN(hours) || hours < 0) throw new Error(`Invalid hoursBeforeCheckin: ${hoursBeforeCheckin}`);
@@ -166,5 +220,8 @@ module.exports = {
   getActiveCodes, createReservation, updateReservationStatus, updateReservationLockUserId,
   getAllReservations, logAction, getActionLog,
   getReservationsNeedingLockUser, getReservationsNeedingNotification,
+  getErrorCount, getLastErrorTime, getLastErrorNotifyTime, logErrorNotify,
+  markReservationFailed,
+  getLastBatteryAlert, logBatteryCheck, logBatteryAlert,
   close
 };

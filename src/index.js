@@ -12,10 +12,18 @@ const NOTIFY_HOURS_BEFORE = parseInt(process.env.NOTIFY_HOURS_BEFORE || '26', 10
 const TRIGGER_PORT = parseInt(process.env.TRIGGER_PORT || '3947', 10);
 const TRIGGER_BIND = process.env.TRIGGER_BIND || '127.0.0.1';
 
+const MAX_LOCK_RETRIES = 3;
+const MAX_NOTIFY_RETRIES = 3;
+const ERROR_NOTIFY_COOLDOWN_HOURS = 6;
+
 // --- Service state ---
 let pollInterval = null;
 let schedulerTask = null;
 let triggerServer = null;
+let lastSuccessfulPoll = null;
+let lastSuccessfulCleanup = null;
+let lastSuccessfulLockOp = null;
+let lastLockBattery = null;
 
 async function handleNewBooking(booking) {
   const { guestName, checkIn, checkOut, accessCode, icalUid, phoneLast4, reservationCode } = booking;
@@ -42,6 +50,12 @@ async function handleNewBooking(booking) {
 }
 
 async function ensureLockUser(res) {
+  const errorCount = db.getErrorCount(res.id);
+  if (errorCount >= MAX_LOCK_RETRIES) {
+    // Already exceeded max retries — skip silently
+    return;
+  }
+
   try {
     const result = await lockManager.addTempUser({
       name: res.guest_name,
@@ -51,10 +65,18 @@ async function ensureLockUser(res) {
     });
 
     db.logAction(res.id, 'lock_user_created', result);
+    lastSuccessfulLockOp = new Date().toISOString();
     console.log(`  Lock user created: ${res.guest_name}`);
   } catch (err) {
     console.error(`  Failed to create lock user for ${res.reservation_code || res.guest_name}: ${err.message}`);
     db.logAction(res.id, 'error', `Lock user creation failed: ${err.message}`);
+
+    const newErrorCount = db.getErrorCount(res.id);
+    if (newErrorCount >= MAX_LOCK_RETRIES) {
+      db.markReservationFailed(res.id);
+      console.error(`  Reservation ${res.reservation_code || res.guest_name} marked FAILED after ${MAX_LOCK_RETRIES} attempts`);
+      await throttledNotifyError(`Lock user creation failed ${MAX_LOCK_RETRIES}x for ${res.reservation_code || res.guest_name}: ${err.message}`);
+    }
   }
 }
 
@@ -89,6 +111,14 @@ async function sendPendingNotifications() {
 
   let sent = 0;
   for (const res of pending) {
+    // Check if notification has failed too many times
+    const notifyErrors = db.getDb().prepare(
+      "SELECT COUNT(*) as cnt FROM action_log WHERE reservation_id = ? AND action = 'error' AND detail LIKE 'Notification failed%'"
+    ).get(res.id);
+    if (notifyErrors && notifyErrors.cnt >= MAX_NOTIFY_RETRIES) {
+      continue; // Skip — already failed max times
+    }
+
     console.log(`Sending notification for ${res.reservation_code || res.guest_name} (check-in: ${res.check_in})`);
     try {
       const ok = await sendNotificationForReservation(res);
@@ -97,6 +127,7 @@ async function sendPendingNotifications() {
         sent++;
       } else {
         console.log(`  Notification unavailable for ${res.reservation_code}`);
+        db.logAction(res.id, 'error', `Notification failed: WhatsApp not ready`);
       }
     } catch (err) {
       console.error(`  Notification failed for ${res.reservation_code}: ${err.message}`);
@@ -104,6 +135,26 @@ async function sendPendingNotifications() {
     }
   }
   return sent;
+}
+
+// Deduplicated error notification — won't send same error more than once per cooldown period
+async function throttledNotifyError(message) {
+  const errorKey = message.substring(0, 200); // Normalize key
+  const lastNotify = db.getLastErrorNotifyTime(errorKey);
+  if (lastNotify) {
+    const hoursSince = (Date.now() - new Date(lastNotify).getTime()) / (1000 * 60 * 60);
+    if (hoursSince < ERROR_NOTIFY_COOLDOWN_HOURS) {
+      console.log(`  Error notification suppressed (cooldown: ${ERROR_NOTIFY_COOLDOWN_HOURS}h)`);
+      return;
+    }
+  }
+
+  try {
+    await notifier.notifyError(message);
+    db.logErrorNotify(errorKey);
+  } catch (err) {
+    console.error(`  Error notification itself failed: ${err.message}`);
+  }
 }
 
 // --- Local HTTP trigger ---
@@ -114,8 +165,25 @@ function startTriggerServer() {
     try {
       if (req.method === 'GET' && req.url === '/status') {
         const active = db.getActiveReservations();
+        const failed = db.getDb().prepare("SELECT COUNT(*) as cnt FROM reservations WHERE status = 'failed'").get();
         const waReady = notifier.isReady();
-        res.end(JSON.stringify({ ok: true, whatsapp: waReady, activeReservations: active.length }));
+
+        // Determine overall health
+        const now = Date.now();
+        const pollStale = lastSuccessfulPoll ? (now - new Date(lastSuccessfulPoll).getTime()) > 30 * 60 * 1000 : true;
+        const cleanupStale = lastSuccessfulCleanup ? (now - new Date(lastSuccessfulCleanup).getTime()) > 2 * 60 * 60 * 1000 : false;
+        const ok = !pollStale && !cleanupStale;
+
+        res.end(JSON.stringify({
+          ok,
+          whatsapp: waReady,
+          lastPoll: lastSuccessfulPoll,
+          lastCleanup: lastSuccessfulCleanup,
+          lastLockOp: lastSuccessfulLockOp,
+          activeReservations: active.length,
+          failedReservations: failed ? failed.cnt : 0,
+          lockBattery: lastLockBattery
+        }));
         return;
       }
 
@@ -201,10 +269,19 @@ async function startService() {
     console.error('Recovery error:', err.message);
   }
 
-  pollInterval = icalPoller.startPolling(handleNewBooking);
-  schedulerTask = scheduler.startScheduler(sendPendingNotifications, recoverMissingLockUsers);
+  pollInterval = icalPoller.startPolling(handleNewBooking, () => {
+    lastSuccessfulPoll = new Date().toISOString();
+  });
+
+  schedulerTask = scheduler.startScheduler(
+    sendPendingNotifications,
+    recoverMissingLockUsers,
+    (batteryLevel) => { lastLockBattery = batteryLevel; },
+    () => { lastSuccessfulCleanup = new Date().toISOString(); }
+  );
 
   const cleaned = await scheduler.cleanupExpired();
+  lastSuccessfulCleanup = new Date().toISOString();
   if (cleaned > 0) console.log(`Cleaned up ${cleaned} expired booking(s) on startup`);
 
   try {

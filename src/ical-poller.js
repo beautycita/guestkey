@@ -70,9 +70,15 @@ function formatDate(icalDate, time) {
 }
 
 async function fetchUrl(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`iCal fetch failed (${url}): ${resp.status}`);
-  return resp.text();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`iCal fetch failed (${url}): ${resp.status}`);
+    return resp.text();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function pollOnce(onNewBooking) {
@@ -167,11 +173,12 @@ async function pollOnce(onNewBooking) {
   return newCount;
 }
 
-function startPolling(onNewBooking) {
+function startPolling(onNewBooking, onPollComplete) {
   console.log('iCal polling started (every 15 minutes)');
 
   pollOnce(onNewBooking).then(count => {
     if (count > 0) console.log(`Found ${count} new booking(s) on startup`);
+    if (onPollComplete) onPollComplete();
   }).catch(err => {
     console.error('iCal poll error:', err.message);
   });
@@ -179,6 +186,7 @@ function startPolling(onNewBooking) {
   const interval = setInterval(() => {
     pollOnce(onNewBooking).then(count => {
       if (count > 0) console.log(`Found ${count} new booking(s)`);
+      if (onPollComplete) onPollComplete();
     }).catch(err => {
       console.error('iCal poll error:', err.message);
     });

@@ -6,6 +6,10 @@ const NOTIFY_METHOD = process.env.NOTIFY_METHOD || 'whatsapp';
 
 let client = null;
 let ready = false;
+let lastSuccessfulSend = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAYS = [30000, 60000, 120000]; // 30s, 60s, 120s
 
 function getClient() {
   if (!client) {
@@ -35,20 +39,50 @@ function getClient() {
 
     client.on('ready', () => {
       ready = true;
+      reconnectAttempts = 0;
       console.log('WhatsApp client ready');
     });
 
     client.on('auth_failure', (msg) => {
       console.error('WhatsApp auth failed:', msg);
       ready = false;
+      // Don't retry — needs manual QR scan. Send email alert.
+      emailNotifier.sendAlert('WhatsApp Auth Failure',
+        `WhatsApp authentication failed: ${msg}\nManual QR scan required to reconnect.`
+      ).catch(e => console.error('Email alert failed:', e.message));
     });
 
     client.on('disconnected', (reason) => {
       console.log('WhatsApp disconnected:', reason);
       ready = false;
+      attemptReconnect();
     });
   }
   return client;
+}
+
+async function attemptReconnect() {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.error(`WhatsApp: gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+    emailNotifier.sendAlert('WhatsApp Disconnected',
+      `WhatsApp disconnected and failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts. Service running without notifications.`
+    ).catch(e => console.error('Email alert failed:', e.message));
+    return;
+  }
+
+  const delay = RECONNECT_DELAYS[reconnectAttempts] || 120000;
+  reconnectAttempts++;
+  console.log(`WhatsApp: reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+
+  setTimeout(async () => {
+    try {
+      await client.initialize();
+      console.log('WhatsApp: reconnect initialized, waiting for ready...');
+    } catch (err) {
+      console.error(`WhatsApp reconnect attempt ${reconnectAttempts} failed: ${err.message}`);
+      attemptReconnect();
+    }
+  }, delay);
 }
 
 async function initialize() {
@@ -70,6 +104,15 @@ async function initialize() {
 function isReady() {
   if (NOTIFY_METHOD === 'email') return emailNotifier.isConfigured();
   return ready;
+}
+
+function isHealthy() {
+  if (NOTIFY_METHOD === 'email') return emailNotifier.isConfigured();
+  if (!ready) return false;
+  // Healthy = ready AND last successful send was < 1 hour ago (if we've ever sent)
+  if (!lastSuccessfulSend) return ready; // Never sent yet, but ready
+  const hoursSinceLastSend = (Date.now() - new Date(lastSuccessfulSend).getTime()) / (1000 * 60 * 60);
+  return hoursSinceLastSend < 1;
 }
 
 function formatNumber(number) {
@@ -96,6 +139,7 @@ async function sendMessage(number, text) {
       return false;
     }
     await client.sendMessage(numberId._serialized, text);
+    lastSuccessfulSend = new Date().toISOString();
     return true;
   } catch (err) {
     console.error('WhatsApp send failed:', err.message);
@@ -174,6 +218,6 @@ async function destroy() {
 }
 
 module.exports = {
-  initialize, isReady, sendMessage,
+  initialize, isReady, isHealthy, sendMessage,
   notifyNewCode, notifyCodeExpired, notifyError, destroy
 };
