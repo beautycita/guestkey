@@ -1,7 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, '..', 'guestkey.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'guestkey.db');
 
 let db;
 
@@ -33,7 +33,7 @@ function initSchema() {
       phone_last4  TEXT,
       reservation_code TEXT,
       status       TEXT NOT NULL DEFAULT 'active',
-      created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
     CREATE TABLE IF NOT EXISTS action_log (
@@ -41,7 +41,7 @@ function initSchema() {
       reservation_id INTEGER REFERENCES reservations(id),
       action         TEXT NOT NULL,
       detail         TEXT,
-      timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
+      timestamp      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
@@ -74,11 +74,13 @@ function getActiveReservations() {
 }
 
 function getExpiredReservations(bufferMinutes) {
+  const mins = parseInt(bufferMinutes, 10);
+  if (isNaN(mins) || mins < 0) throw new Error(`Invalid bufferMinutes: ${bufferMinutes}`);
   return getDb().prepare(`
     SELECT * FROM reservations
     WHERE status = 'active'
-    AND datetime(check_out, '+${bufferMinutes} minutes') < datetime('now')
-  `).all();
+    AND datetime(check_out, '+' || ? || ' minutes') < datetime('now', 'localtime')
+  `).all(String(mins));
 }
 
 function getActiveCodes() {
@@ -120,6 +122,37 @@ function getActionLog(reservationId) {
   ).all(reservationId);
 }
 
+// Active reservations that never got a lock_user_created action (interrupted or failed)
+function getReservationsNeedingLockUser() {
+  return getDb().prepare(`
+    SELECT r.* FROM reservations r
+    WHERE r.status = 'active'
+    AND NOT EXISTS (
+      SELECT 1 FROM action_log a
+      WHERE a.reservation_id = r.id AND a.action = 'lock_user_created'
+    )
+    ORDER BY r.check_in
+  `).all();
+}
+
+// Active reservations within hours of check-in that haven't been successfully notified yet
+function getReservationsNeedingNotification(hoursBeforeCheckin) {
+  const hours = parseInt(hoursBeforeCheckin, 10);
+  if (isNaN(hours) || hours < 0) throw new Error(`Invalid hoursBeforeCheckin: ${hoursBeforeCheckin}`);
+  return getDb().prepare(`
+    SELECT r.* FROM reservations r
+    WHERE r.status = 'active'
+    AND datetime(r.check_in, '-' || ? || ' hours') <= datetime('now', 'localtime')
+    AND NOT EXISTS (
+      SELECT 1 FROM action_log a
+      WHERE a.reservation_id = r.id
+      AND a.action = 'notified'
+      AND a.detail LIKE '%"whatsapp":true%'
+    )
+    ORDER BY r.check_in
+  `).all(String(hours));
+}
+
 function close() {
   if (db) {
     db.close();
@@ -131,5 +164,7 @@ module.exports = {
   getDb, getConfig, setConfig,
   getReservationByIcalUid, getActiveReservations, getExpiredReservations,
   getActiveCodes, createReservation, updateReservationStatus, updateReservationLockUserId,
-  getAllReservations, logAction, getActionLog, close
+  getAllReservations, logAction, getActionLog,
+  getReservationsNeedingLockUser, getReservationsNeedingNotification,
+  close
 };

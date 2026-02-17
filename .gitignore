@@ -4,3 +4,8 @@ logs/*.json
 .wwebjs_auth/
 .wwebjs_cache/
 guestkey.db
+guestkey.db-wal
+guestkey.db-shm
+browser_state/
+screenshots/
+heartbeat.json

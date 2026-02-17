@@ -1,13 +1,11 @@
-const { execFile, exec } = require('child_process');
-const os = require('os');
+const { exec } = require('child_process');
+const path = require('path');
 const db = require('./db');
 
+const LOCK_MODE = process.env.LOCK_MODE || 'ssh';
+const LOCK_SCRIPT = process.env.LOCK_SCRIPT_PATH || '~/guestkey/air_lock.py';
+const LOCK_VENV = process.env.LOCK_VENV_PATH ?? '~/beautycita-scraper/venv/bin/activate';
 const BEAUTYPI_HOST = process.env.BEAUTYPI_HOST || 'dmyl@100.93.1.103';
-const BEAUTYPI_SCRIPT = process.env.BEAUTYPI_SCRIPT || '~/guestkey/air_lock.py';
-const BEAUTYPI_VENV = process.env.BEAUTYPI_VENV || '~/beautycita-scraper/venv/bin/activate';
-
-// Detect if we're running on beautypi itself
-const IS_LOCAL = os.hostname() === 'beautypi' || os.hostname().startsWith('beautypi');
 
 function generateCode() {
   const activeCodes = db.getActiveCodes();
@@ -22,29 +20,29 @@ function generateCode() {
 }
 
 /**
- * Run air_lock.py on beautypi - locally if on beautypi, via SSH otherwise.
+ * Run air_lock.py — locally or via SSH depending on LOCK_MODE.
  * Returns parsed JSON result from the script.
  */
-function runOnBeautypi(args) {
+function runLockScript(args) {
   return new Promise((resolve, reject) => {
-    const cmd = `source ${BEAUTYPI_VENV} && cd ~/guestkey && python3 ${BEAUTYPI_SCRIPT} ${args}`;
+    const cmd = LOCK_VENV
+      ? `source ${LOCK_VENV} && python3 ${LOCK_SCRIPT} ${args}`
+      : `python3 ${LOCK_SCRIPT} ${args}`;
 
     const callback = (err, stdout, stderr) => {
       if (err) {
-        // Try to extract JSON error from stdout
         const lines = (stdout || '').trim().split('\n');
         for (const line of lines) {
           try {
             const parsed = JSON.parse(line);
             if (parsed.success === false) {
-              return reject(new Error(parsed.error || 'Unknown beautypi error'));
+              return reject(new Error(parsed.error || 'Unknown lock script error'));
             }
           } catch {}
         }
-        return reject(new Error(`SSH error: ${err.message}\n${stderr || ''}`));
+        return reject(new Error(`Lock script error: ${err.message}\n${stderr || ''}`));
       }
 
-      // Find the JSON result line in stdout
       const lines = stdout.trim().split('\n');
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
@@ -53,14 +51,14 @@ function runOnBeautypi(args) {
         } catch {}
       }
 
-      // No JSON found, return raw output
       resolve({ success: true, raw: stdout.trim() });
     };
 
-    if (IS_LOCAL) {
-      exec(cmd, { timeout: 120000, shell: '/bin/bash' }, callback);
+    if (LOCK_MODE === 'local') {
+      exec(cmd, { timeout: 180000, shell: '/bin/bash' }, callback);
     } else {
-      execFile('ssh', ['-o', 'ConnectTimeout=10', BEAUTYPI_HOST, cmd], { timeout: 120000 }, callback);
+      const sshCmd = `ssh -o ConnectTimeout=10 ${BEAUTYPI_HOST} "${cmd.replace(/"/g, '\\"')}"`;
+      exec(sshCmd, { timeout: 180000, shell: '/bin/bash' }, callback);
     }
   });
 }
@@ -71,10 +69,10 @@ function shellEscape(str) {
 
 async function addTempUser({ name, password, checkIn, checkOut }) {
   const args = `add --name ${shellEscape(name)} --code ${shellEscape(String(password))} --checkin ${shellEscape(checkIn)} --checkout ${shellEscape(checkOut)}`;
-  const result = await runOnBeautypi(args);
+  const result = await runLockScript(args);
 
   if (!result.success) {
-    throw new Error(result.error || 'Failed to add user on lock');
+    throw new Error(result.error || `Failed to add user on lock (step: ${result.step || 'unknown'})`);
   }
 
   return result;
@@ -82,7 +80,7 @@ async function addTempUser({ name, password, checkIn, checkOut }) {
 
 async function deleteUser(userName) {
   const args = `delete --name ${shellEscape(userName)}`;
-  const result = await runOnBeautypi(args);
+  const result = await runLockScript(args);
 
   if (!result.success) {
     throw new Error(result.error || 'Failed to delete user from lock');
@@ -92,10 +90,10 @@ async function deleteUser(userName) {
 }
 
 async function listUsers() {
-  const result = await runOnBeautypi('list');
+  const result = await runLockScript('list');
   return result;
 }
 
 module.exports = {
-  generateCode, addTempUser, deleteUser, listUsers, runOnBeautypi
+  generateCode, addTempUser, deleteUser, listUsers, runLockScript
 };

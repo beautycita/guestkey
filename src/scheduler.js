@@ -32,18 +32,38 @@ async function cleanupExpired() {
   return expired.length;
 }
 
-function startScheduler() {
+function startScheduler(sendPendingNotifications, recoverMissingLockUsers) {
   // Run cleanup every hour at :05
   const task = cron.schedule('5 * * * *', async () => {
     try {
       const count = await cleanupExpired();
       if (count > 0) console.log(`Cleaned up ${count} expired booking(s)`);
     } catch (err) {
-      console.error('Scheduler error:', err.message);
+      console.error('Cleanup scheduler error:', err.message);
+    }
+
+    // Retry any missing lock users
+    if (recoverMissingLockUsers) {
+      try {
+        const recovered = await recoverMissingLockUsers();
+        if (recovered > 0) console.log(`Recovered ${recovered} missing lock user(s)`);
+      } catch (err) {
+        console.error('Lock recovery error:', err.message);
+      }
+    }
+
+    // Check for pending notifications
+    if (sendPendingNotifications) {
+      try {
+        const sent = await sendPendingNotifications();
+        if (sent > 0) console.log(`Sent ${sent} pending notification(s)`);
+      } catch (err) {
+        console.error('Notification scheduler error:', err.message);
+      }
     }
   });
 
-  console.log('Cleanup scheduler started (runs hourly at :05)');
+  console.log('Scheduler started (runs hourly at :05 — cleanup, lock recovery, notifications)');
   return task;
 }
 

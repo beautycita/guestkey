@@ -55,12 +55,17 @@ rsync -avz --exclude node_modules --exclude .wwebjs_auth --exclude '*.db*' /home
 - `docs/ops-guide.md` - Operations guide with troubleshooting
 
 ## Credentials
-Stored in `.env` (git-ignored):
+All credentials stored in `.env` (git-ignored). NEVER commit secrets to tracked files.
+
+Stored in `.env`:
+- `ULTRALOQ_EMAIL` / `ULTRALOQ_PASSWORD` - air.ultraloq.com login
 - `AIRBNB_ICAL_URL` - Airbnb calendar feed
+- `BOOKING_ICAL_URL` - Booking.com calendar feed
 - `WHATSAPP_NOTIFY_NUMBER` - WhatsApp notification recipient
-- `BEAUTYPI_HOST` - SSH target for lock automation
-- `BEAUTYPI_SCRIPT` - Path to air_lock.py on beautypi
-- `BEAUTYPI_VENV` - Path to Python venv on beautypi
+- `LOCK_MODE` - `local` (run air_lock.py directly) or `ssh` (SSH to beautypi)
+- `LOCK_SCRIPT_PATH` / `LOCK_VENV_PATH` - Paths for lock automation
+- `HEARTBEAT_URL` / `HEARTBEAT_TOKEN` - Failover heartbeat config
+- `NOTIFY_METHOD` - `whatsapp` (primary) or `email` (standby)
 - `DEFAULT_CHECKIN_TIME` / `DEFAULT_CHECKOUT_TIME` - Default times
 - `CLEANUP_BUFFER_MINUTES` - Buffer after checkout before code removal
 

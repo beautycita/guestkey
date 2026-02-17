@@ -1,5 +1,8 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const path = require('path');
+const emailNotifier = require('./email-notifier');
+
+const NOTIFY_METHOD = process.env.NOTIFY_METHOD || 'whatsapp';
 
 let client = null;
 let ready = false;
@@ -21,7 +24,6 @@ function getClient() {
       console.log('\n========================================');
       console.log('  Scan this QR code with WhatsApp:');
       console.log('========================================');
-      // Print QR as text - whatsapp-web.js uses qrcode-terminal if available
       try {
         const qrcode = require('qrcode-terminal');
         qrcode.generate(qr, { small: true });
@@ -50,9 +52,13 @@ function getClient() {
 }
 
 async function initialize() {
+  if (NOTIFY_METHOD !== 'whatsapp') {
+    console.log(`Notification method: ${NOTIFY_METHOD} (WhatsApp skipped)`);
+    return;
+  }
+
   const c = getClient();
   await c.initialize();
-  // Wait for ready event
   if (!ready) {
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('WhatsApp init timed out (2 minutes)')), 120000);
@@ -62,15 +68,19 @@ async function initialize() {
 }
 
 function isReady() {
+  if (NOTIFY_METHOD === 'email') return emailNotifier.isConfigured();
   return ready;
 }
 
 function formatNumber(number) {
-  // Strip leading + and any non-digits
   return number.replace(/\D/g, '') + '@c.us';
 }
 
 async function sendMessage(number, text) {
+  if (NOTIFY_METHOD === 'email') {
+    return emailNotifier.sendEmail('GuestKey Message', text);
+  }
+
   if (!ready) {
     console.error('WhatsApp not ready, message not sent. Logging instead.');
     console.log(`[UNSENT MESSAGE to ${number}]:\n${text}`);
@@ -78,7 +88,6 @@ async function sendMessage(number, text) {
   }
 
   try {
-    // Use getNumberId to resolve the correct chatId (handles country code variants)
     const stripped = number.replace(/\D/g, '');
     const numberId = await client.getNumberId(stripped);
     if (!numberId) {
@@ -95,10 +104,17 @@ async function sendMessage(number, text) {
   }
 }
 
-async function notifyNewCode({ guestName, accessCode, checkIn, checkOut, phoneLast4, reservationCode }) {
-  const number = process.env.WHATSAPP_NOTIFY_NUMBER;
-  if (!number) {
-    console.error('WHATSAPP_NOTIFY_NUMBER not set');
+async function notifyNewCode(params) {
+  if (NOTIFY_METHOD === 'email') {
+    return emailNotifier.notifyNewCode(params);
+  }
+
+  const { guestName, accessCode, checkIn, checkOut, phoneLast4, reservationCode } = params;
+  const wifeNumber = process.env.WHATSAPP_WIFE_NUMBER;
+  const ownerNumber = process.env.WHATSAPP_NOTIFY_NUMBER;
+
+  if (!wifeNumber && !ownerNumber) {
+    console.error('No WhatsApp numbers configured');
     return false;
   }
 
@@ -115,10 +131,17 @@ async function notifyNewCode({ guestName, accessCode, checkIn, checkOut, phoneLa
     `Salida:   ${fmtDate(checkOut)}`
   ].join('\n');
 
-  return sendMessage(number, msg);
+  // Send to wife (pre-check-in notification)
+  const target = wifeNumber || ownerNumber;
+  return sendMessage(target, msg);
 }
 
-async function notifyCodeExpired({ guestName, reservationCode }) {
+async function notifyCodeExpired(params) {
+  if (NOTIFY_METHOD === 'email') {
+    return emailNotifier.notifyCodeExpired(params);
+  }
+
+  const { guestName, reservationCode } = params;
   const number = process.env.WHATSAPP_NOTIFY_NUMBER;
   if (!number) return false;
 
@@ -133,9 +156,12 @@ async function notifyCodeExpired({ guestName, reservationCode }) {
 }
 
 async function notifyError(message) {
+  if (NOTIFY_METHOD === 'email') {
+    return emailNotifier.notifyError(message);
+  }
+
   const number = process.env.WHATSAPP_NOTIFY_NUMBER;
   if (!number) return false;
-
   return sendMessage(number, `*GuestKey Error:* ${message}`);
 }
 
