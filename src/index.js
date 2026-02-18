@@ -80,6 +80,84 @@ async function ensureLockUser(res) {
   }
 }
 
+async function handleCancellation(reservation) {
+  console.log(`\nCancellation confirmed: ${reservation.reservation_code || reservation.guest_name}`);
+
+  try {
+    await lockManager.deleteUser(reservation.guest_name);
+    lastSuccessfulLockOp = new Date().toISOString();
+    console.log(`  Lock user deleted: ${reservation.guest_name}`);
+  } catch (err) {
+    console.error(`  Failed to delete lock user for ${reservation.guest_name}: ${err.message}`);
+    db.logAction(reservation.id, 'error', `Lock user deletion on cancel failed: ${err.message}`);
+  }
+
+  db.updateReservationStatus(reservation.id, 'cancelled');
+  db.logAction(reservation.id, 'cancelled', { reservationCode: reservation.reservation_code, reason: 'iCal UID removed' });
+
+  try {
+    await notifier.notifyCancellation({
+      guestName: reservation.guest_name,
+      reservationCode: reservation.reservation_code,
+      accessCode: reservation.access_code
+    });
+  } catch (err) {
+    console.error(`  Cancellation notification failed: ${err.message}`);
+  }
+}
+
+async function handleDateChange(reservation, newCheckIn, newCheckOut) {
+  const oldCheckIn = reservation.check_in;
+  const oldCheckOut = reservation.check_out;
+  console.log(`\nDate change: ${reservation.reservation_code || reservation.guest_name}`);
+  console.log(`  Old: ${oldCheckIn} → ${oldCheckOut}`);
+  console.log(`  New: ${newCheckIn} → ${newCheckOut}`);
+
+  // Delete old lock schedule
+  try {
+    await lockManager.deleteUser(reservation.guest_name);
+    console.log(`  Old lock user deleted: ${reservation.guest_name}`);
+  } catch (err) {
+    console.error(`  Failed to delete old lock user: ${err.message}`);
+    db.logAction(reservation.id, 'error', `Lock user deletion on date change failed: ${err.message}`);
+  }
+
+  // Update DB dates
+  db.updateReservationDates(reservation.id, newCheckIn, newCheckOut);
+
+  // Re-add with new dates, same code
+  try {
+    const result = await lockManager.addTempUser({
+      name: reservation.guest_name,
+      password: reservation.access_code,
+      checkIn: newCheckIn,
+      checkOut: newCheckOut
+    });
+    lastSuccessfulLockOp = new Date().toISOString();
+    db.logAction(reservation.id, 'lock_user_created', result);
+    console.log(`  Lock user re-created with new dates: ${reservation.guest_name}`);
+  } catch (err) {
+    console.error(`  Failed to re-create lock user: ${err.message}`);
+    db.logAction(reservation.id, 'error', `Lock user re-creation on date change failed: ${err.message}`);
+  }
+
+  db.logAction(reservation.id, 'dates_changed', {
+    old: { checkIn: oldCheckIn, checkOut: oldCheckOut },
+    new: { checkIn: newCheckIn, checkOut: newCheckOut }
+  });
+
+  try {
+    await notifier.notifyDateChange({
+      guestName: reservation.guest_name,
+      reservationCode: reservation.reservation_code,
+      accessCode: reservation.access_code,
+      oldCheckIn, oldCheckOut, newCheckIn, newCheckOut
+    });
+  } catch (err) {
+    console.error(`  Date change notification failed: ${err.message}`);
+  }
+}
+
 async function recoverMissingLockUsers() {
   const missing = db.getReservationsNeedingLockUser();
   if (missing.length === 0) return 0;
@@ -269,8 +347,11 @@ async function startService() {
     console.error('Recovery error:', err.message);
   }
 
-  pollInterval = icalPoller.startPolling(handleNewBooking, () => {
-    lastSuccessfulPoll = new Date().toISOString();
+  pollInterval = icalPoller.startPolling({
+    onNewBooking: handleNewBooking,
+    onPollComplete: () => { lastSuccessfulPoll = new Date().toISOString(); },
+    onCancellation: handleCancellation,
+    onDateChange: handleDateChange
   });
 
   schedulerTask = scheduler.startScheduler(
@@ -388,6 +469,6 @@ if (command === 'setup') {
 }
 
 module.exports = {
-  startService, stopService, handleNewBooking,
+  startService, stopService, handleNewBooking, handleCancellation, handleDateChange,
   sendPendingNotifications, recoverMissingLockUsers
 };

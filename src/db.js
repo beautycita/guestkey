@@ -104,6 +104,10 @@ function updateReservationLockUserId(id, lockUserId) {
   getDb().prepare('UPDATE reservations SET lock_user_id = ? WHERE id = ?').run(lockUserId, id);
 }
 
+function updateReservationDates(id, checkIn, checkOut) {
+  getDb().prepare('UPDATE reservations SET check_in = ?, check_out = ? WHERE id = ?').run(checkIn, checkOut, id);
+}
+
 function getAllReservations(limit = 20) {
   return getDb().prepare('SELECT * FROM reservations ORDER BY created_at DESC LIMIT ?').all(limit);
 }
@@ -217,7 +221,7 @@ function close() {
 module.exports = {
   getDb, getConfig, setConfig,
   getReservationByIcalUid, getActiveReservations, getExpiredReservations,
-  getActiveCodes, createReservation, updateReservationStatus, updateReservationLockUserId,
+  getActiveCodes, createReservation, updateReservationStatus, updateReservationLockUserId, updateReservationDates,
   getAllReservations, logAction, getActionLog,
   getReservationsNeedingLockUser, getReservationsNeedingNotification,
   getErrorCount, getLastErrorTime, getLastErrorNotifyTime, logErrorNotify,

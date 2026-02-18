@@ -81,12 +81,14 @@ async function fetchUrl(url) {
   }
 }
 
-async function pollOnce(onNewBooking) {
+async function pollOnce({ onNewBooking, onCancellation, onDateChange }) {
   const checkinTime = process.env.DEFAULT_CHECKIN_TIME || '15:00';
   const checkoutTime = process.env.DEFAULT_CHECKOUT_TIME || '11:00';
 
   let newCount = 0;
-  const allFeedUids = new Set();
+  let airbnbOk = false;
+  let bookingOk = false;
+  const feedEvents = new Map(); // uid -> { startDate, endDate }
 
   // --- Airbnb ---
   const airbnbUrl = process.env.AIRBNB_ICAL_URL;
@@ -94,7 +96,8 @@ async function pollOnce(onNewBooking) {
     try {
       const text = await fetchUrl(airbnbUrl);
       const events = parseIcal(text);
-      events.forEach(e => { if (e.uid) allFeedUids.add(e.uid); });
+      airbnbOk = true;
+      events.forEach(e => { if (e.uid) feedEvents.set(e.uid, { startDate: e.startDate, endDate: e.endDate }); });
 
       const reservations = events.filter(e =>
         e.summary === 'Reserved' && e.uid && e.startDate && e.endDate
@@ -132,7 +135,8 @@ async function pollOnce(onNewBooking) {
     try {
       const text = await fetchUrl(bookingUrl);
       const events = parseIcal(text);
-      events.forEach(e => { if (e.uid) allFeedUids.add(e.uid); });
+      bookingOk = true;
+      events.forEach(e => { if (e.uid) feedEvents.set(e.uid, { startDate: e.startDate, endDate: e.endDate }); });
 
       for (const ev of events) {
         if (!ev.uid || !ev.startDate || !ev.endDate) continue;
@@ -161,22 +165,62 @@ async function pollOnce(onNewBooking) {
     }
   }
 
-  // Check for cancelled bookings (UID in DB but gone from feeds)
+  // --- Cancellation + date change detection ---
   const activeReservations = db.getActiveReservations();
   for (const active of activeReservations) {
-    if (active.ical_uid && !allFeedUids.has(active.ical_uid)) {
-      console.log(`Booking ${active.reservation_code} appears cancelled (UID gone from iCal)`);
-      db.logAction(active.id, 'cancellation_detected', 'iCal UID no longer present');
+    if (!active.ical_uid) continue;
+
+    // Determine source from guest_name prefix
+    const isAirbnb = active.guest_name.includes('Airbnb-');
+    const isBooking = active.guest_name.includes('Booking-');
+    const sourceFeedOk = (isAirbnb && airbnbOk) || (isBooking && bookingOk);
+
+    // Skip if the source feed failed — can't distinguish cancellation from fetch error
+    if (!sourceFeedOk) continue;
+
+    const feedEvent = feedEvents.get(active.ical_uid);
+
+    if (!feedEvent) {
+      // UID missing from feed — possible cancellation
+      // Require 2 consecutive detections >10 min apart before acting
+      const prevDetection = db.getDb().prepare(
+        "SELECT timestamp FROM action_log WHERE reservation_id = ? AND action = 'cancellation_detected' ORDER BY timestamp DESC LIMIT 1"
+      ).get(active.id);
+
+      if (prevDetection) {
+        const minutesSince = (Date.now() - new Date(prevDetection.timestamp).getTime()) / (1000 * 60);
+        if (minutesSince >= 10) {
+          // Confirmed cancellation
+          console.log(`Booking ${active.reservation_code} confirmed cancelled (UID gone from 2 consecutive polls)`);
+          if (onCancellation) await onCancellation(active);
+        }
+        // else: too recent, wait for next poll
+      } else {
+        // First detection — log warning only
+        console.log(`Booking ${active.reservation_code} may be cancelled (UID gone from iCal, awaiting confirmation)`);
+        db.logAction(active.id, 'cancellation_detected', 'iCal UID no longer present');
+      }
+    } else {
+      // UID still in feed — check for date changes
+      const newCheckIn = formatDate(feedEvent.startDate, checkinTime);
+      const newCheckOut = formatDate(feedEvent.endDate, checkoutTime);
+
+      if (newCheckIn !== active.check_in || newCheckOut !== active.check_out) {
+        console.log(`Booking ${active.reservation_code} dates changed: ${active.check_in}→${newCheckIn}, ${active.check_out}→${newCheckOut}`);
+        if (onDateChange) await onDateChange(active, newCheckIn, newCheckOut);
+      }
     }
   }
 
   return newCount;
 }
 
-function startPolling(onNewBooking, onPollComplete) {
+function startPolling({ onNewBooking, onPollComplete, onCancellation, onDateChange } = {}) {
   console.log('iCal polling started (every 15 minutes)');
 
-  pollOnce(onNewBooking).then(count => {
+  const callbacks = { onNewBooking, onCancellation, onDateChange };
+
+  pollOnce(callbacks).then(count => {
     if (count > 0) console.log(`Found ${count} new booking(s) on startup`);
     if (onPollComplete) onPollComplete();
   }).catch(err => {
@@ -184,7 +228,7 @@ function startPolling(onNewBooking, onPollComplete) {
   });
 
   const interval = setInterval(() => {
-    pollOnce(onNewBooking).then(count => {
+    pollOnce(callbacks).then(count => {
       if (count > 0) console.log(`Found ${count} new booking(s)`);
       if (onPollComplete) onPollComplete();
     }).catch(err => {

@@ -199,6 +199,51 @@ async function notifyCodeExpired(params) {
   return sendMessage(number, msg);
 }
 
+async function notifyCancellation({ guestName, reservationCode, accessCode }) {
+  if (NOTIFY_METHOD === 'email') {
+    return emailNotifier.notifyCancellation({ guestName, reservationCode, accessCode });
+  }
+
+  const number = process.env.WHATSAPP_NOTIFY_NUMBER;
+  if (!number) return false;
+
+  const msg = [
+    `*GuestKey: Reservación Cancelada*`,
+    ``,
+    `Reservación: ${reservationCode || guestName}`,
+    `Código de acceso *${accessCode}* revocado de la cerradura.`
+  ].join('\n');
+
+  return sendMessage(number, msg);
+}
+
+async function notifyDateChange({ guestName, reservationCode, accessCode, oldCheckIn, oldCheckOut, newCheckIn, newCheckOut }) {
+  if (NOTIFY_METHOD === 'email') {
+    return emailNotifier.notifyDateChange({ guestName, reservationCode, accessCode, oldCheckIn, oldCheckOut, newCheckIn, newCheckOut });
+  }
+
+  const number = process.env.WHATSAPP_NOTIFY_NUMBER;
+  if (!number) return false;
+
+  const fmtDate = (dt) => {
+    const d = new Date(dt.replace(' ', 'T'));
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  };
+
+  const msg = [
+    `*GuestKey: Fechas Modificadas*`,
+    ``,
+    `Reservación: ${reservationCode || guestName}`,
+    `Código: *${accessCode}*`,
+    ``,
+    `Antes:  ${fmtDate(oldCheckIn)} → ${fmtDate(oldCheckOut)}`,
+    `Ahora:  ${fmtDate(newCheckIn)} → ${fmtDate(newCheckOut)}`
+  ].join('\n');
+
+  return sendMessage(number, msg);
+}
+
 async function notifyError(message) {
   if (NOTIFY_METHOD === 'email') {
     return emailNotifier.notifyError(message);
@@ -219,5 +264,5 @@ async function destroy() {
 
 module.exports = {
   initialize, isReady, isHealthy, sendMessage,
-  notifyNewCode, notifyCodeExpired, notifyError, destroy
+  notifyNewCode, notifyCodeExpired, notifyCancellation, notifyDateChange, notifyError, destroy
 };

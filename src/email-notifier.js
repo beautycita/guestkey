@@ -71,6 +71,29 @@ async function notifyCodeExpired({ guestName, reservationCode }) {
   return sendEmail(subject, text);
 }
 
+async function notifyCancellation({ guestName, reservationCode, accessCode }) {
+  const subject = `GuestKey: Cancelada - ${reservationCode || guestName}`;
+  const text = [
+    `Reservacion: ${reservationCode || guestName}`,
+    `Codigo de acceso ${accessCode} revocado de la cerradura.`
+  ].join('\n');
+
+  return sendEmail(subject, text);
+}
+
+async function notifyDateChange({ guestName, reservationCode, accessCode, oldCheckIn, oldCheckOut, newCheckIn, newCheckOut }) {
+  const subject = `GuestKey: Fechas Modificadas - ${reservationCode || guestName}`;
+  const text = [
+    `Reservacion: ${reservationCode || guestName}`,
+    `Codigo: ${accessCode}`,
+    ``,
+    `Antes:  ${fmtDate(oldCheckIn)} - ${fmtDate(oldCheckOut)}`,
+    `Ahora:  ${fmtDate(newCheckIn)} - ${fmtDate(newCheckOut)}`
+  ].join('\n');
+
+  return sendEmail(subject, text);
+}
+
 async function notifyError(message) {
   return sendEmail('GuestKey Error', message);
 }
@@ -80,5 +103,5 @@ async function sendAlert(subject, body) {
 }
 
 module.exports = {
-  sendEmail, notifyNewCode, notifyCodeExpired, notifyError, sendAlert, isConfigured
+  sendEmail, notifyNewCode, notifyCodeExpired, notifyCancellation, notifyDateChange, notifyError, sendAlert, isConfigured
 };
